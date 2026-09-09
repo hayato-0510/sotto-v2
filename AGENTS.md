@@ -91,19 +91,23 @@ Android からは検出できないため、**当面のマッチング動作保�
 
 ## このリポジトリの構成情報
 
-**アプリのプラットフォームは未選定である。** ネイティブ（Swift と Kotlin）／Flutter／React Native の
-どれにするかは `docs/設計書.md` §7 の技術選定パスで決める。**現状のコードが Next.js 前提なのは、
-移植した AI パイプラインを動かすための足場だから**であり、製品のプラットフォームを意味しない。
-勝手に「Next.js で画面を作る」と解釈して実装を始めないこと。
+構成は2層に分かれる。**アプリ（Flutter ＋ ネイティブBLE）と、AIサーバ（現状の Next.js / TypeScript）。**
+`docs/設計書.md` §7.1 で決めた。**現状のコードが Next.js だけなのは、アプリがまだ1行も無いから**であり、
+「Next.js で画面を作る」という意味ではない。UI は Flutter で書く。
 
 | 項目 | 値 |
 | :--- | :--- |
-| Next.js | **16.3.4**（App Router）。**学習データより新しい。** Route Handler を書く前に `node_modules/next/dist/docs/01-app/` を読む。※AIサーバ側として残る可能性はあるが未確定 |
-| React | 19.2.8（同上。UI に使うとは決まっていない） |
-| zod | **4.x**。`z.toJSONSchema()` で Gemini の `responseJsonSchema` 用スキーマを作る（`lib/llm.ts` 参照）。プラットフォームに依存しない |
+| アプリ | **Flutter。今回は Android のみ**（iOS は次フェーズ、設計書 §7.1）。UI 9画面は Flutter、**BLE だけ自作のプラットフォームチャネル越しに Kotlin** で書く。汎用BLEライブラリは使わない |
+| BLEチャネルの口 | `startAdvertising(token)` / `stopAdvertising()` / `startScan(serviceUUID)→(token, rssi)` / モーションゲートの有効・無効。これだけ。増やす前に設計書 §7.2 を読む |
+| AIサーバ | 現状の `lib/*.ts` をそのまま残す。**`lib/prompts.ts` は実運用で3回チューニング済みなので触らない** |
+| Next.js | **16.3.4**（App Router）。**学習データより新しい。** Route Handler を書く前に `node_modules/next/dist/docs/01-app/` を読む。AIサーバとして継続 |
+| zod | **4.x**。`z.toJSONSchema()` で Gemini の `responseJsonSchema` 用スキーマを作る（`lib/llm.ts` 参照） |
 | Node | `.nvmrc` は22 |
-| UIの作り方 | 前身は「濃紺の帯＋角丸パネルの反復」でAIっぽいと指摘された。**同じコンポーネントを機械的に繰り返さないこと**（POSTMORTEM.md §5）。これはWebでもネイティブでも同じ |
-| LAN経由の実機確認 | Next.js の dev サーバを実機から叩く場合、`next.config.ts` の `allowedDevOrigins` にIPを入れないと403で弾かれる（前身で実際に踏んだ）。AIサーバを Next で持つ間は有効 |
+| UIの作り方 | 前身は「濃紺の帯＋角丸パネルの反復」でAIっぽいと指摘された。**同じコンポーネントを機械的に繰り返さないこと**（POSTMORTEM.md §5）。Flutter でも同じ |
+| LAN経由の実機確認 | 実機から AI サーバを叩く場合、`next.config.ts` の `allowedDevOrigins` にIPを入れないと403で弾かれる（前身で実際に踏んだ） |
+
+**実装を始める前にスパイクを回すこと**（設計書 §7.3）。RSSI で数m判定が安定するか、背景での発信が
+何分続くか、2台間の GATT で Handoff を直接渡せるか。ここが駄目だと設計書 §1・§2 の書き直しになる。
 
 ---
 
@@ -134,7 +138,7 @@ Anthropic（代替経路）を使う場合は `claude-api` スキルを先に読
 
 ## 検証
 
-**変更したら必ず通すこと。**（現状の `lib/*.ts`＝AIパイプラインに対して）
+**変更したら必ず通すこと。** AIサーバ側（`lib/*.ts`）は次のとおり。
 
 ```bash
 npm run check
@@ -142,9 +146,9 @@ npm run check
 
 `typecheck` → `lint` → `test` → `build` を順に実行する。**これが通らないコードをコミットしない。**
 
-プラットフォームを選定したら、そちらの検証コマンドをここに追記すること。
-`lib/speech.test.ts` と `lib/fallback.test.ts` はプロダクトの安全根幹なので、
-どのプラットフォームへ移っても等価なテストを残す（`docs/設計書.md` §8.3）。
+Flutter アプリを作り始めたら `flutter analyze` と `flutter test` をここに追記すること。
+`lib/speech.test.ts` と `lib/fallback.test.ts` はプロダクトの安全根幹なので、発話検証を
+アプリ側へ移すことがあっても等価なテストを必ず残す（`docs/設計書.md` §8.3）。
 
 プロンプトだけを試すときは UI を経由せずに：
 
