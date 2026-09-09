@@ -1,0 +1,40 @@
+{
+  "generatedAt": "2026-09-09T22:25:15.717Z",
+  "condition": "貧血気味で立っているとふらつく",
+  "note": "scripts/pregenerate.mjs で生成した。手で編集しない",
+  "items": [
+    {
+      "crowding": "空いている",
+      "label": "空いている",
+      "handoff": {
+        "request": "座って移動できると助かります",
+        "action": "立って席の前で2秒待ってから離れる",
+        "reason": "ふらつきを防ぎ安全に移動するためです",
+        "seconds": 15,
+        "physicalLoad": "低"
+      }
+    },
+    {
+      "crowding": "混雑",
+      "label": "混んでいる",
+      "handoff": {
+        "request": "座って移動できると助かります。",
+        "action": "立って通路側へ寄り座席へ誘導する",
+        "reason": "ふらつきがあり安全に移動するためです。",
+        "seconds": 15,
+        "physicalLoad": "中"
+      }
+    },
+    {
+      "crowding": "超満員",
+      "label": "ぎゅうぎゅう",
+      "handoff": {
+        "request": "ふらつきがあるので、座って移動できると助かります。",
+        "action": "荷物を持ち、隣との間を空けて席の空間を作る",
+        "reason": "ふらつきがある状態で安全に座るためです。",
+        "seconds": 15,
+        "physicalLoad": "低"
+      }
+    }
+  ]
+}
