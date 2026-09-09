@@ -91,12 +91,13 @@ vercel --prod
 Vercel の Environment Variables に `GOOGLE_API_KEY` と `SOTTO_BLOB_KEY`（`.env.local.example` 参照）を登録して再デプロイし、
 `npm run smoke -- https://<デプロイ先>` で `provider=google blobKey=set` を確認する。
 
-**Windows で `.env.local` から値を流し込むときは `\r` を落とすこと。** ファイルが CRLF だと
-`vercel env add` に渡した値の末尾に `\r` が付き、鍵が無効になって生成がすべて定型文に落ちる（実際に踏んだ）。
-`smoke` の結果に「（定型）」が並ぶのに `provider=google` なら、まずこれを疑う。
+**`.env.local` から値を流し込むときは、引用符と `\r` を落とすこと。** Next の env ローダは値を囲む引用符を
+剥がすのでローカルでは動くが、`vercel env add` に渡すと引用符ごと登録されて鍵が無効になり、生成がすべて
+定型文に落ちる（実際に踏んだ。CRLF の `\r` も同じ）。`smoke` で「（定型）」が並ぶのに `provider=google` なら、
+`/api/health` の `googleKey.length` をローカルの鍵の長さと突き合わせる。
 
 ```bash
-grep '^GOOGLE_API_KEY=' .env.local | cut -d= -f2- | tr -d '\r\n' | vercel env add GOOGLE_API_KEY production
+grep '^GOOGLE_API_KEY=' .env.local | cut -d= -f2- | tr -d '\r\n' | sed -E 's/^(["'"'"'])(.*)\1$/\2/' | vercel env add GOOGLE_API_KEY production
 ```
 
 アプリはデプロイ先の URL を埋め込んでビルドする：
