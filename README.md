@@ -46,9 +46,24 @@
 `lib/speech.ts` と `lib/fallback.ts`（発話混入の検出とフォールバック＝**プロダクトの安全根幹**）、
 `lib/types.ts`、`scripts/try.mjs`。
 
-## セットアップ
+## 現在の実装状態（2026-09-10）
 
-現状のコードは AI サーバ側（`lib/*.ts`）だけで、Flutter アプリはまだ1行も無い。
+AI サーバ（`app/api/*`、`lib/*.ts`）と Flutter アプリ（`mobile/`）の両方がある。
+**実機での近接検知は未検証。** 実機不在のままスパイクを飛ばして実装した経緯と暫定値は
+[`docs/開発計画.md`](docs/開発計画.md) と [`docs/設計書.md`](docs/設計書.md) §7.2.1、実機での確認手順は
+[`docs/手動確認.md`](docs/手動確認.md) にある。
+
+| エンドポイント | 役割 |
+| :--- | :--- |
+| `POST /api/needs` | ステップ1：状態テキスト → Needs |
+| `POST /api/demands` | 本人が確認した Needs をサーバ鍵で封緘して返す。サーバは何も保存しない |
+| `POST /api/handoff` | ステップ2：封緘 ＋ 混雑度 → Handoff（発話検証つき） |
+| `GET /api/health` | 疎通確認（鍵の値は返さない） |
+
+需要の中身は封緘されたまま受け手の端末が持ち、BLE（GATT）で譲る側の端末へ渡り、サーバでだけ復号される。
+譲る側の端末は Needs を一度も復号できない。
+
+## セットアップ
 
 ```bash
 npm install
@@ -61,4 +76,31 @@ cp .env.local.example .env.local
 ```bash
 npm run check   # typecheck → lint → test → build
 npm run try -- "貧血気味で立っているとふらつく" 超満員 3   # UIを経由せずプロンプトを試す
+npm run smoke -- http://localhost:3000                   # 4本のエンドポイントを順に叩く（デプロイ先のURLも可）
+npm run pregenerate                                       # 審査用の混雑度対比データを mobile/assets に生成
+cd mobile && flutter analyze && flutter test              # アプリ側
+```
+
+## デプロイ（Vercel）と APK
+
+```bash
+vercel login
+vercel --prod
+```
+
+Vercel の Environment Variables に `GOOGLE_API_KEY` と `SOTTO_BLOB_KEY`（`.env.local.example` 参照）を登録して再デプロイし、
+`npm run smoke -- https://<デプロイ先>` で `provider=google blobKey=set` を確認する。
+
+**Windows で `.env.local` から値を流し込むときは `\r` を落とすこと。** ファイルが CRLF だと
+`vercel env add` に渡した値の末尾に `\r` が付き、鍵が無効になって生成がすべて定型文に落ちる（実際に踏んだ）。
+`smoke` の結果に「（定型）」が並ぶのに `provider=google` なら、まずこれを疑う。
+
+```bash
+grep '^GOOGLE_API_KEY=' .env.local | cut -d= -f2- | tr -d '\r\n' | vercel env add GOOGLE_API_KEY production
+```
+
+アプリはデプロイ先の URL を埋め込んでビルドする：
+
+```bash
+cd mobile && flutter build apk --release --dart-define=SOTTO_API_BASE=https://<デプロイ先>
 ```
