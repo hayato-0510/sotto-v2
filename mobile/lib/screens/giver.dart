@@ -44,24 +44,29 @@ class _GiverFlowState extends State<GiverFlow> {
   void initState() {
     super.initState();
     _scans = _ble.scans.listen((h) {
+      final wasNear = _someoneNear;
       if (h.rssi < nearRssiDbm) {
         _hits.remove(h.id);
       } else {
         _hits[h.id] = h;
       }
-      if (mounted) setState(() {});
+      // スキャン結果は毎秒何十件も来る。見え方が変わるときだけ描き直す
+      if (wasNear != _someoneNear && mounted) setState(() {});
     });
     _messages = _ble.messages.listen(_onMessage);
-    _errors = _ble.errors.listen((m) => setState(() => _error = m));
+    _errors = _ble.errors.listen((m) {
+      if (mounted) setState(() => _error = m);
+    });
     _drops = _ble.disconnections.listen((_) {
       // 受け渡し中に相手が切れた。何も言わず探索に戻る
-      if (_stage == _Stage.action) _backToScan();
+      if (_stage == _Stage.action || _stage == _Stage.preparing) _backToScan();
     });
     _prune = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_stage != _Stage.scanning) return;
       final now = DateTime.now();
-      final before = _hits.length;
+      final wasNear = _someoneNear;
       _hits.removeWhere((_, h) => now.difference(h.at) > scanStaleness);
-      if (before != _hits.length && mounted) setState(() {});
+      if (wasNear != _someoneNear && mounted) setState(() {});
     });
     _startScan();
   }
@@ -89,7 +94,7 @@ class _GiverFlowState extends State<GiverFlow> {
       }
       await _ble.startScan();
     } on BleException catch (e) {
-      setState(() => _error = e.message);
+      if (mounted) setState(() => _error = e.message);
     }
   }
 
@@ -98,7 +103,8 @@ class _GiverFlowState extends State<GiverFlow> {
   ScanHit? get _nearest {
     if (_hits.isEmpty) return null;
     // 譲る側に選ばせない（設計書 §2.6）。もっとも近い1人にシステムが決める。
-    // 設計書は「待ち時間の長い順」だが、このビルドでは電波の強い順で代用する（開発計画に記録）
+    // 設計書は「待ち時間の長い順」だが、このビルドでは電波の強い順で代用する。
+    // 画面にもその旨を出している（AGENTS.md §5、_scanning の footer）
     return _hits.values.reduce((a, b) => a.rssi >= b.rssi ? a : b);
   }
 
@@ -117,6 +123,9 @@ class _GiverFlowState extends State<GiverFlow> {
       final blob = await _ble.connect(target.id);
       final handoff = await _api.generateHandoff(blob, crowding);
       await _ble.write(OfferMessage(handoff));
+      if (!mounted) return;
+      // 待っている間に taken や切断で決着していたら、そちらを優先する（先着1件、設計書 §2.6）
+      if (_stage != _Stage.preparing) return;
       setState(() {
         _handoff = handoff;
         _stage = _Stage.action;
@@ -129,7 +138,10 @@ class _GiverFlowState extends State<GiverFlow> {
   }
 
   void _fail(String message) {
+    _timer?.cancel();
     _ble.disconnect().catchError((_) {});
+    if (!mounted) return;
+    if (_stage != _Stage.preparing) return;
     setState(() {
       _error = message;
       _stage = _Stage.scanning;
@@ -141,6 +153,7 @@ class _GiverFlowState extends State<GiverFlow> {
     _timer?.cancel();
     await _ble.write(const CancelMessage()).catchError((_) {});
     await _ble.disconnect().catchError((_) {});
+    if (!mounted) return;
     setState(() => _stage = _Stage.cancelled);
     _timer = Timer(const Duration(milliseconds: 2500), _backToScan);
   }
@@ -162,12 +175,14 @@ class _GiverFlowState extends State<GiverFlow> {
   void _settle(_Stage s) {
     _timer?.cancel();
     _ble.disconnect().catchError((_) {});
+    if (!mounted) return;
     setState(() => _stage = s);
     _timer = Timer(const Duration(seconds: 4), _backToScan);
   }
 
   void _backToScan() {
     if (!mounted) return;
+    _timer?.cancel();
     _ble.disconnect().catchError((_) {});
     setState(() {
       _stage = _Stage.scanning;
@@ -183,7 +198,10 @@ class _GiverFlowState extends State<GiverFlow> {
   @override
   Widget build(BuildContext context) => switch (_stage) {
         _Stage.scanning => _scanning(),
-        _Stage.preparing => const Sheet(body: Lead('動作を用意しています')),
+        _Stage.preparing => Sheet(
+            body: const Lead('動作を用意しています'),
+            corner: TextButton(onPressed: _cancel, child: const Text('やめる')),
+          ),
         _Stage.action => _action(),
         _Stage.thanks => const Sheet(body: Lead('そっと伝わりました', color: live)),
         _Stage.taken => const Sheet(body: Lead('他の方が席を譲りました。ありがとうございます')),
@@ -228,6 +246,12 @@ class _GiverFlowState extends State<GiverFlow> {
       ),
       action: FilledButton(onPressed: _crowding == null ? null : _offer, child: const Text('譲る')),
       corner: TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('閉じる')),
+      footer: _hits.length < 2
+          ? null
+          : const Note(
+              'デモ版：近くに複数の人がいるときは、本来は待ち時間の長い人からですが、'
+              'このビルドでは電波の強い人から順になります',
+            ),
     );
   }
 

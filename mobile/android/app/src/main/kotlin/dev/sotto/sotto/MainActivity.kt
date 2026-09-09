@@ -13,7 +13,7 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 
 /**
- * Flutter と BLE の境界（設計書 §7.1「自作のプラットフォームチャネル」）。
+ * Flutter と BLE の境界（設計書 §7.1「自作のプラットフォームチャネル」、暫定値は §7.2.1）。
  *
  * 口は次のとおり。増やす前に設計書 §7.2 を読む。
  *   受け手：startDemand(blob) / stopDemand() / demandReply(json) / demandRelease()
@@ -21,20 +21,28 @@ import io.flutter.plugin.common.MethodChannel
  *   共通　：requestPermissions() → bool / isBluetoothOn() → bool
  *
  * イベント（EventChannel）：
- *   {type:"scan", id, token, rssi} / {type:"message", json} / {type:"advertising", on}
+ *   {type:"scan", id, rssi} / {type:"message", json} / {type:"advertising", on}
  *   {type:"disconnected"} / {type:"error", message}
+ *
+ * 発信の寿命は「待機画面が出ている間」に揃える。Activity が破棄されたら（タスクから消す等）
+ * 発信も止める。画面に出ていない発信を残さない（AGENTS.md §4「隠れて発信しない」）。
  */
 class MainActivity : FlutterActivity() {
     private var sink: EventChannel.EventSink? = null
-    private var peripheral: DemandPeripheral? = null
     private var central: GiverCentral? = null
     private var permissionResult: MethodChannel.Result? = null
 
+    private val peripheral: DemandPeripheral get() = DemandPeripheral.get(this)
     private val emit: (Map<String, Any?>) -> Unit = { event -> sink?.success(event) }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        peripheral = DemandPeripheral(applicationContext, emit)
+        // 前のエンジンが残した発信があれば止める。新しい UI はそれを知らないので、出しっぱなしにしない
+        if (peripheral.isRunning) {
+            peripheral.stop()
+            DemandService.stop(this)
+        }
+        peripheral.emit = emit
         central = GiverCentral(applicationContext, emit)
 
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, Gatt.EVENT_CHANNEL).setStreamHandler(
@@ -54,20 +62,20 @@ class MainActivity : FlutterActivity() {
                         val blob = call.argument<String>("blob") ?: return@setMethodCallHandler result.error("arg", "blob が必要です", null)
                         if (!isBluetoothOn()) return@setMethodCallHandler result.error("bt_off", "Bluetooth がオフです", null)
                         DemandService.start(this)
-                        peripheral?.start(blob)
+                        peripheral.start(blob)
                         result.success(null)
                     }
                     "stopDemand" -> {
-                        peripheral?.stop()
+                        peripheral.stop()
                         DemandService.stop(this)
                         result.success(null)
                     }
                     "demandReply" -> {
-                        peripheral?.reply(call.argument<String>("json") ?: "")
-                        result.success(null)
+                        // 通知が実際に送られてから返す。呼び出し側はこの後で stopDemand してよい
+                        peripheral.reply(call.argument<String>("json") ?: "") { result.success(null) }
                     }
                     "demandRelease" -> {
-                        peripheral?.release()
+                        peripheral.release()
                         result.success(null)
                     }
 
@@ -124,6 +132,8 @@ class MainActivity : FlutterActivity() {
             result.success(true)
             return
         }
+        // 前の要求が未解決なら、放置せず「未許可」で返してから新しい要求を受ける
+        permissionResult?.success(false)
         permissionResult = result
         ActivityCompat.requestPermissions(this, missing.toTypedArray(), 7)
     }
@@ -143,6 +153,11 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         central?.stopScan()
         central?.disconnect()
+        if (peripheral.isRunning) {
+            peripheral.stop()
+            DemandService.stop(this)
+        }
+        sink = null
         super.onDestroy()
     }
 }

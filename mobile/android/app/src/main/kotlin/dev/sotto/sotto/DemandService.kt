@@ -17,6 +17,10 @@ import android.os.IBinder
  * Android は前景サービスに常駐通知を必須とする。この通知が「発信中であることを常に示す」
  * （設計書 §1.4、NFR-03）の役目を兼ねる。文言は待機画面（設計書 §3.3）と揃える。
  * 通知を消す＝発信を止める、ではない。停止はアプリの［ やめる ］から行う。
+ *
+ * 発信そのものは [DemandPeripheral]（プロセスに1つ）が持つ。プロセスが殺されて
+ * サービスだけが復活しても発信は無いので、その場合は通知を出さずに終了する
+ * （発信していないのに「発信中」と出す嘘をつかない）。
  */
 class DemandService : Service() {
     companion object {
@@ -48,12 +52,17 @@ class DemandService : Service() {
             .setOngoing(true)
             .setContentIntent(open)
             .build()
+        // startForegroundService で起動された以上、まず startForeground を呼ぶ義務がある
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
-        return START_STICKY
+        if (!DemandPeripheral.get(this).isRunning) {
+            // 発信が無い（プロセス再起動などでサービスだけ来た）。通知ごと消す
+            stopSelf()
+        }
+        return START_NOT_STICKY
     }
 
     private fun ensureChannel() {

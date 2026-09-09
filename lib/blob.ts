@@ -30,16 +30,25 @@ export type SealedDemand = z.infer<typeof SealedDemandSchema>;
 export class BlobError extends Error {}
 
 /**
- * 開発用の固定鍵。SOTTO_BLOB_KEY が未設定のときだけ使う。
- * 公開環境でこれが使われると、譲る側の端末を持つ人が Needs を復号できてしまう。
- * 疾患名は元から含まれない（型に無い）が、それでも公開時は必ず環境変数を設定すること。
+ * 開発用の固定鍵。**ローカル開発でのみ**、SOTTO_BLOB_KEY が未設定のときに使う。
+ * 公開環境でこれが使われると、譲る側の端末を持つ人が Needs を復号できてしまい、
+ * 封緘方式の唯一の防壁が消える。本番（NODE_ENV=production か Vercel 上）では
+ * 鍵が無ければ封緘も開封も失敗させ、静かに動き続けないようにする。
  */
 const DEV_KEY_HEX = '5f2b7d3c9a1e4b6d8c0f2a4e6b8d1c3e5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b';
 let warned = false;
 
+/** 本番かどうか。Vercel は NODE_ENV=production を立てるが、念のため VERCEL も見る */
+function isProduction(): boolean {
+  return process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
+}
+
 function key(): Buffer {
   const hex = process.env.SOTTO_BLOB_KEY;
   if (hex && /^[0-9a-fA-F]{64}$/.test(hex)) return Buffer.from(hex, 'hex');
+  if (isProduction()) {
+    throw new BlobError('SOTTO_BLOB_KEY が未設定か形式不正です（64桁の16進）。本番では固定鍵で代替しません');
+  }
   if (!warned) {
     warned = true;
     console.warn(

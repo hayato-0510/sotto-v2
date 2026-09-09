@@ -19,10 +19,17 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
+import org.json.JSONObject
 import java.security.SecureRandom
 
 /**
  * 受け手側：発信（advertising）＋ GATT サーバ。
+ *
+ * プロセスに1つ（[DemandPeripheral.get]）。Activity や FlutterEngine が作り直されても同じ
+ * インスタンスを掴めるので、発信が孤児になって止められなくなることがない。
+ *
+ * スレッド：GATT のコールバックは binder スレッドで届く。読み取り応答だけはその場で返し
+ * （`blobBytes` は @Volatile）、状態を動かす処理はすべて main スレッドへ寄せる。
  *
  * 排他制御（設計書 §2.6）：［ 譲る ］の書き込みは先着1件だけを受け付ける。
  * 2件目には OUTBOX で {"type":"taken"} を返し、状態を動かさない。
@@ -31,26 +38,42 @@ import java.security.SecureRandom
  * 画面にもその旨を出す（AGENTS.md §5）。
  */
 @SuppressLint("MissingPermission")
-class DemandPeripheral(private val context: Context, private val emit: (Map<String, Any?>) -> Unit) {
+class DemandPeripheral private constructor(private val context: Context) {
+    companion object {
+        @Volatile private var instance: DemandPeripheral? = null
+
+        fun get(context: Context): DemandPeripheral =
+            instance ?: synchronized(this) {
+                instance ?: DemandPeripheral(context.applicationContext).also { instance = it }
+            }
+    }
+
     private val tag = "SottoPeripheral"
     private val main = Handler(Looper.getMainLooper())
     private val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
     private val adapter get() = manager.adapter
 
+    /** Dart へのイベント。エンジンが作り直されたら差し替える */
+    @Volatile var emit: (Map<String, Any?>) -> Unit = {}
+
     private var advertiser: BluetoothLeAdvertiser? = null
     private var server: BluetoothGattServer? = null
     private var outbox: BluetoothGattCharacteristic? = null
-    private var blobBytes: ByteArray = ByteArray(0)
-    private var running = false
+    @Volatile private var blobBytes: ByteArray = ByteArray(0)
+    @Volatile private var running = false
 
-    /** 通知を購読している譲る側の端末 */
+    /** 通知を購読している譲る側の端末（main スレッドでのみ触る） */
     private val subscribers = LinkedHashSet<BluetoothDevice>()
 
-    /** 先着で［ 譲る ］を書き込んだ端末。null なら未提示 */
+    /** 先着で［ 譲る ］を書き込んだ端末。null なら未提示（main スレッドでのみ触る） */
     private var offerer: BluetoothDevice? = null
 
-    /** 分割書き込み（prepared write）の一時バッファ */
+    /** 分割書き込み（prepared write）の一時バッファ（main スレッドでのみ触る） */
     private val pending = HashMap<String, java.io.ByteArrayOutputStream>()
+
+    /** 送信完了待ちの通知。onNotificationSent かタイムアウトで解決する */
+    private var notifyDone: (() -> Unit)? = null
+    private val notifyTimeout = Runnable { finishNotify() }
 
     val isRunning get() = running
 
@@ -66,8 +89,11 @@ class DemandPeripheral(private val context: Context, private val emit: (Map<Stri
     }
 
     fun stop() {
+        val wasRunning = running
         running = false
         main.removeCallbacks(rotate)
+        main.removeCallbacks(notifyTimeout)
+        notifyDone = null
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (e: Exception) { Log.w(tag, "stopAdvertising", e) }
         advertiser = null
         try { server?.close() } catch (e: Exception) { Log.w(tag, "server.close", e) }
@@ -76,18 +102,35 @@ class DemandPeripheral(private val context: Context, private val emit: (Map<Stri
         subscribers.clear()
         offerer = null
         pending.clear()
-        emit(mapOf("type" to "advertising", "on" to false))
+        if (wasRunning) emit(mapOf("type" to "advertising", "on" to false))
     }
 
-    /** 譲る側へ返事（thanks / not_found）。先着の端末にだけ届ける */
-    fun reply(json: String) {
-        val device = offerer ?: return
-        notify(device, json)
+    /**
+     * 譲る側へ返事（thanks / not_found）。先着の端末にだけ届ける。
+     * [done] は通知が実際に送られた（または 1.5 秒で諦めた）ときに main スレッドで呼ぶ。
+     * 呼び出し側はこれを待ってから stop() すること。閉じるのが先だと通知が電波に乗らない。
+     */
+    fun reply(json: String, done: () -> Unit) {
+        val device = offerer
+        if (device == null || server == null) {
+            done()
+            return
+        }
+        notifyDone = done
+        main.postDelayed(notifyTimeout, 1_500)
+        if (!notify(device, json)) finishNotify()
     }
 
     /** 提示を解放する（お礼・見つからない・取り消し後）。次の［ 譲る ］を受けられる状態に戻す */
     fun release() {
         offerer = null
+    }
+
+    private fun finishNotify() {
+        main.removeCallbacks(notifyTimeout)
+        val cb = notifyDone ?: return
+        notifyDone = null
+        cb()
     }
 
     // ── 発信 ────────────────────────────────────────
@@ -176,13 +219,14 @@ class DemandPeripheral(private val context: Context, private val emit: (Map<Stri
         server = s
     }
 
-    private fun notify(device: BluetoothDevice, json: String) {
-        val s = server ?: return
-        val c = outbox ?: return
+    /** 通知を積む。積めなければ false */
+    private fun notify(device: BluetoothDevice, json: String): Boolean {
+        val s = server ?: return false
+        val c = outbox ?: return false
         val bytes = json.toByteArray(Charsets.UTF_8)
-        try {
+        return try {
             if (Build.VERSION.SDK_INT >= 33) {
-                s.notifyCharacteristicChanged(device, c, false, bytes)
+                s.notifyCharacteristicChanged(device, c, false, bytes) == BluetoothGatt.GATT_SUCCESS
             } else {
                 @Suppress("DEPRECATION")
                 c.value = bytes
@@ -191,30 +235,34 @@ class DemandPeripheral(private val context: Context, private val emit: (Map<Stri
             }
         } catch (e: Exception) {
             Log.w(tag, "notify", e)
+            false
         }
     }
 
     private val serverCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
-            if (newState == BluetoothGatt.STATE_DISCONNECTED) {
+            if (newState != BluetoothGatt.STATE_DISCONNECTED) return
+            main.post {
                 subscribers.remove(device)
                 pending.remove(device.address)
                 // 提示中の相手が切れた（アプリ終了・圏外）。取り消しと同じ扱いで探索へ戻す
-                if (offerer != null && offerer?.address == device.address) {
+                if (offerer?.address == device.address) {
                     offerer = null
-                    main.post { emit(mapOf("type" to "message", "json" to "{\"type\":\"cancel\"}")) }
+                    emit(mapOf("type" to "message", "json" to "{\"type\":\"cancel\"}"))
                 }
             }
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            main.post { finishNotify() }
         }
 
         override fun onCharacteristicReadRequest(
             device: BluetoothDevice, requestId: Int, offset: Int, characteristic: BluetoothGattCharacteristic,
         ) {
+            // 応答は同期的に要る。blobBytes は @Volatile なので binder スレッドから読んでよい
             val s = server ?: return
-            val value = when (characteristic.uuid) {
-                Gatt.DEMAND_UUID -> blobBytes
-                else -> ByteArray(0)
-            }
+            val value = if (characteristic.uuid == Gatt.DEMAND_UUID) blobBytes else ByteArray(0)
             if (offset > value.size) {
                 s.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
                 return
@@ -222,23 +270,14 @@ class DemandPeripheral(private val context: Context, private val emit: (Map<Stri
             s.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value.copyOfRange(offset, value.size))
         }
 
-        override fun onDescriptorReadRequest(
-            device: BluetoothDevice, requestId: Int, offset: Int, descriptor: BluetoothGattDescriptor,
-        ) {
-            val v = if (subscribers.contains(device)) BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            else BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
-            server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, v)
-        }
-
         override fun onDescriptorWriteRequest(
             device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?,
         ) {
-            if (descriptor.uuid == Gatt.CCCD_UUID) {
-                val enable = value != null && value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                if (enable) subscribers.add(device) else subscribers.remove(device)
-            }
             if (responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            if (descriptor.uuid != Gatt.CCCD_UUID) return
+            val enable = value != null && value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            main.post { if (enable) subscribers.add(device) else subscribers.remove(device) }
         }
 
         override fun onCharacteristicWriteRequest(
@@ -249,28 +288,33 @@ class DemandPeripheral(private val context: Context, private val emit: (Map<Stri
                 if (responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
                 return
             }
-            if (preparedWrite) {
-                val buf = pending.getOrPut(device.address) { java.io.ByteArrayOutputStream() }
-                if (value != null) buf.write(value)
-                if (responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
-                return
+            if (responseNeeded) {
+                server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, if (preparedWrite) value else null)
             }
-            if (responseNeeded) server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-            if (value != null) handleInbox(device, String(value, Charsets.UTF_8))
+            val copy = value?.copyOf() ?: return
+            main.post {
+                if (preparedWrite) {
+                    pending.getOrPut(device.address) { java.io.ByteArrayOutputStream() }.write(copy)
+                } else {
+                    handleInbox(device, String(copy, Charsets.UTF_8))
+                }
+            }
         }
 
         override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
             server?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
-            val buf = pending.remove(device.address) ?: return
-            if (execute) handleInbox(device, String(buf.toByteArray(), Charsets.UTF_8))
+            main.post {
+                val buf = pending.remove(device.address) ?: return@post
+                if (execute) handleInbox(device, String(buf.toByteArray(), Charsets.UTF_8))
+            }
         }
     }
 
-    /** 譲る側からのメッセージ。先着1件の判定だけここで行い、中身は Dart に渡す */
+    /** 譲る側からのメッセージ（main スレッド）。先着1件の判定だけここで行い、中身は Dart に渡す */
     private fun handleInbox(device: BluetoothDevice, json: String) {
-        val isOffer = json.contains("\"type\":\"offer\"") || json.contains("\"type\": \"offer\"")
+        val type = try { JSONObject(json).optString("type") } catch (_: Exception) { "" }
         val current = offerer
-        if (isOffer) {
+        if (type == "offer") {
             if (current != null && current.address != device.address) {
                 // 2件目。状態は動かさず、その端末にだけ「他の方が譲りました」を返す
                 notify(device, "{\"type\":\"taken\"}")
@@ -282,6 +326,6 @@ class DemandPeripheral(private val context: Context, private val emit: (Map<Stri
             if (current == null || current.address != device.address) return
             offerer = null
         }
-        main.post { emit(mapOf("type" to "message", "json" to json)) }
+        emit(mapOf("type" to "message", "json" to json))
     }
 }

@@ -94,7 +94,13 @@ Vercel の Environment Variables に `GOOGLE_API_KEY` と `SOTTO_BLOB_KEY`（`.e
 **`.env.local` から値を流し込むときは、引用符と `\r` を落とすこと。** Next の env ローダは値を囲む引用符を
 剥がすのでローカルでは動くが、`vercel env add` に渡すと引用符ごと登録されて鍵が無効になり、生成がすべて
 定型文に落ちる（実際に踏んだ。CRLF の `\r` も同じ）。`smoke` で「（定型）」が並ぶのに `provider=google` なら、
-`/api/health` の `googleKey.length` をローカルの鍵の長さと突き合わせる。
+SDK を疑う前に、取り出した値そのもので Gemini の REST を叩いて鍵を検証する（200 以外なら取り出し方が悪い）：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H "x-goog-api-key: $(grep '^GOOGLE_API_KEY=' .env.local | cut -d= -f2- | tr -d '\r\n' | sed -E 's/^(["'"'"'])(.*)\1$/\2/')" https://generativelanguage.googleapis.com/v1beta/models
+```
+
+`SOTTO_BLOB_KEY` は本番では必須で、無いと `/api/demands` と `/api/handoff` が失敗する（固定鍵で代替しない）。
 
 ```bash
 grep '^GOOGLE_API_KEY=' .env.local | cut -d= -f2- | tr -d '\r\n' | sed -E 's/^(["'"'"'])(.*)\1$/\2/' | vercel env add GOOGLE_API_KEY production

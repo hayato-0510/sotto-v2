@@ -25,6 +25,10 @@ import android.util.Log
  *
  * 譲る側はアプリを開いている間だけスキャンする（プル型、設計書 §2.2）。背景スキャンはしない。
  * ［ 譲る ］で相手に接続し、封緘された需要を読み、Handoff を書き込み、返事（お礼など）を通知で受ける。
+ *
+ * スレッド：GATT のコールバックは binder スレッドで届くので、状態を触る処理はすべて main へ寄せる。
+ * 保留中のコールバック（onConnected / onWritten）は必ず1回だけ解決する。
+ * 切断・タイムアウト・disconnect() のどれで終わっても、待っている側を放置しない。
  */
 @SuppressLint("MissingPermission")
 class GiverCentral(private val context: Context, private val emit: (Map<String, Any?>) -> Unit) {
@@ -32,11 +36,13 @@ class GiverCentral(private val context: Context, private val emit: (Map<String, 
     private val main = Handler(Looper.getMainLooper())
     private val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
     private val adapter get() = manager.adapter
+    private val serviceUuid = ParcelUuid(Gatt.SERVICE_UUID)
 
     private var scanner: BluetoothLeScanner? = null
     private var scanning = false
     private val seen = HashMap<String, BluetoothDevice>()
 
+    // 以下はすべて main スレッドでのみ触る
     private var gatt: BluetoothGatt? = null
     private var inbox: BluetoothGattCharacteristic? = null
     private var demand: BluetoothGattCharacteristic? = null
@@ -52,7 +58,7 @@ class GiverCentral(private val context: Context, private val emit: (Map<String, 
             return
         }
         scanner = s
-        val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(Gatt.SERVICE_UUID)).build()
+        val filter = ScanFilter.Builder().setServiceUuid(serviceUuid).build()
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
@@ -70,23 +76,24 @@ class GiverCentral(private val context: Context, private val emit: (Map<String, 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device
-            seen[device.address] = device
-            val token = result.scanRecord?.getServiceData(ParcelUuid(Gatt.SERVICE_UUID))
-            val tokenHex = token?.joinToString("") { String.format("%02x", it) } ?: ""
+            val rssi = result.rssi
             main.post {
-                emit(mapOf("type" to "scan", "id" to device.address, "token" to tokenHex, "rssi" to result.rssi))
+                seen[device.address] = device
+                emit(mapOf("type" to "scan", "id" to device.address, "rssi" to rssi))
             }
         }
 
         override fun onScanFailed(errorCode: Int) {
-            scanning = false
-            main.post { emit(mapOf("type" to "error", "message" to "スキャンを開始できませんでした（コード $errorCode）")) }
+            main.post {
+                scanning = false
+                emit(mapOf("type" to "error", "message" to "スキャンを開始できませんでした（コード $errorCode）"))
+            }
         }
     }
 
     // ── 接続と受け渡し ───────────────────────────────
 
-    /** 接続して封緘された需要を読む。完了時に blob を返す */
+    /** 接続して封緘された需要を読む。完了時に blob を返す。10秒で諦める */
     fun connect(id: String, callback: (Result<String>) -> Unit) {
         disconnect()
         val device = seen[id] ?: adapter?.getRemoteDevice(id)
@@ -99,14 +106,9 @@ class GiverCentral(private val context: Context, private val emit: (Map<String, 
         main.postDelayed(connectTimeout, 10_000)
     }
 
-    private val connectTimeout = Runnable {
-        val cb = onConnected ?: return@Runnable
-        onConnected = null
-        disconnect()
-        cb(Result.failure(IllegalStateException("相手の端末に接続できませんでした")))
-    }
+    private val connectTimeout = Runnable { failConnect("相手の端末に接続できませんでした") }
 
-    /** INBOX に JSON を書き込む（offer / cancel） */
+    /** INBOX に JSON を書き込む（offer / cancel）。5秒で諦める */
     fun write(json: String, callback: (Result<Unit>) -> Unit) {
         val g = gatt
         val c = inbox
@@ -114,7 +116,9 @@ class GiverCentral(private val context: Context, private val emit: (Map<String, 
             callback(Result.failure(IllegalStateException("接続していません")))
             return
         }
+        settleWrite(Result.failure(IllegalStateException("前の書き込みが完了していません")))
         onWritten = callback
+        main.postDelayed(writeTimeout, 5_000)
         val bytes = json.toByteArray(Charsets.UTF_8)
         val ok = if (Build.VERSION.SDK_INT >= 33) {
             g.writeCharacteristic(c, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS
@@ -125,27 +129,52 @@ class GiverCentral(private val context: Context, private val emit: (Map<String, 
             @Suppress("DEPRECATION")
             g.writeCharacteristic(c)
         }
-        if (!ok) {
-            onWritten = null
-            callback(Result.failure(IllegalStateException("書き込みを開始できませんでした")))
-        }
+        if (!ok) settleWrite(Result.failure(IllegalStateException("書き込みを開始できませんでした")))
     }
 
+    private val writeTimeout = Runnable { settleWrite(Result.failure(IllegalStateException("書き込みの応答がありません"))) }
+
+    /** 接続を閉じる。待っているコールバックがあれば失敗として解決する */
     fun disconnect() {
+        main.removeCallbacks(connectTimeout)
+        val pendingConnect = onConnected
+        onConnected = null
+        settleWrite(Result.failure(IllegalStateException("接続を閉じました")))
+        try { gatt?.disconnect() } catch (_: Exception) {}
+        try { gatt?.close() } catch (_: Exception) {}
+        gatt = null
+        inbox = null
+        demand = null
+        pendingConnect?.invoke(Result.failure(IllegalStateException("接続を閉じました")))
+    }
+
+    /** onConnected を1回だけ解決する（main スレッド） */
+    private fun settleConnect(result: Result<String>) {
+        main.removeCallbacks(connectTimeout)
+        val cb = onConnected ?: return
+        onConnected = null
+        cb(result)
+    }
+
+    /** onWritten を1回だけ解決する（main スレッド） */
+    private fun settleWrite(result: Result<Unit>) {
+        main.removeCallbacks(writeTimeout)
+        val cb = onWritten ?: return
+        onWritten = null
+        cb(result)
+    }
+
+    private fun failConnect(message: String) {
+        if (onConnected == null) return
+        val cb = onConnected
+        onConnected = null
         main.removeCallbacks(connectTimeout)
         try { gatt?.disconnect() } catch (_: Exception) {}
         try { gatt?.close() } catch (_: Exception) {}
         gatt = null
         inbox = null
         demand = null
-    }
-
-    private fun fail(message: String) {
-        val cb = onConnected
-        onConnected = null
-        main.removeCallbacks(connectTimeout)
-        disconnect()
-        main.post { cb?.invoke(Result.failure(IllegalStateException(message))) }
+        cb?.invoke(Result.failure(IllegalStateException(message)))
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
@@ -153,10 +182,14 @@ class GiverCentral(private val context: Context, private val emit: (Map<String, 
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 g.requestMtu(Gatt.MTU)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                if (onConnected != null) {
-                    fail("相手の端末との接続が切れました")
-                } else {
-                    main.post { emit(mapOf("type" to "disconnected")) }
+                main.post {
+                    if (g !== gatt) return@post
+                    if (onConnected != null) {
+                        failConnect("相手の端末との接続が切れました")
+                    } else {
+                        settleWrite(Result.failure(IllegalStateException("相手の端末との接続が切れました")))
+                        emit(mapOf("type" to "disconnected"))
+                    }
                 }
             }
         }
@@ -166,57 +199,64 @@ class GiverCentral(private val context: Context, private val emit: (Map<String, 
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-            val service = g.getService(Gatt.SERVICE_UUID) ?: return fail("相手の端末に Sotto のサービスがありません")
-            demand = service.getCharacteristic(Gatt.DEMAND_UUID)
-            inbox = service.getCharacteristic(Gatt.INBOX_UUID)
-            val outbox = service.getCharacteristic(Gatt.OUTBOX_UUID)
-            if (demand == null || inbox == null || outbox == null) return fail("相手の端末の特性が揃っていません")
-            g.setCharacteristicNotification(outbox, true)
-            val cccd = outbox.getDescriptor(Gatt.CCCD_UUID) ?: return fail("通知の設定ができません")
-            if (Build.VERSION.SDK_INT >= 33) {
-                g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-            } else {
-                @Suppress("DEPRECATION")
-                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                @Suppress("DEPRECATION")
-                g.writeDescriptor(cccd)
+            main.post {
+                if (g !== gatt) return@post
+                val service = g.getService(Gatt.SERVICE_UUID)
+                    ?: return@post failConnect("相手の端末に Sotto のサービスがありません")
+                demand = service.getCharacteristic(Gatt.DEMAND_UUID)
+                inbox = service.getCharacteristic(Gatt.INBOX_UUID)
+                val outbox = service.getCharacteristic(Gatt.OUTBOX_UUID)
+                if (demand == null || inbox == null || outbox == null) {
+                    return@post failConnect("相手の端末の特性が揃っていません")
+                }
+                g.setCharacteristicNotification(outbox, true)
+                val cccd = outbox.getDescriptor(Gatt.CCCD_UUID) ?: return@post failConnect("通知の設定ができません")
+                if (Build.VERSION.SDK_INT >= 33) {
+                    g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    @Suppress("DEPRECATION")
+                    g.writeDescriptor(cccd)
+                }
             }
         }
 
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            val d = demand ?: return fail("需要の特性がありません")
-            @Suppress("DEPRECATION")
-            g.readCharacteristic(d)
+            main.post {
+                if (g !== gatt) return@post
+                val d = demand ?: return@post failConnect("需要の特性がありません")
+                @Suppress("DEPRECATION")
+                g.readCharacteristic(d)
+            }
         }
 
-        private fun deliverRead(uuid: java.util.UUID, value: ByteArray) {
+        private fun deliverRead(g: BluetoothGatt, uuid: java.util.UUID, value: ByteArray, status: Int) {
             if (uuid != Gatt.DEMAND_UUID) return
-            val cb = onConnected ?: return
-            onConnected = null
-            main.removeCallbacks(connectTimeout)
             val blob = String(value, Charsets.UTF_8)
-            main.post { cb(Result.success(blob)) }
+            main.post {
+                if (g !== gatt) return@post
+                if (status != BluetoothGatt.GATT_SUCCESS) failConnect("需要を読み取れませんでした")
+                else settleConnect(Result.success(blob))
+            }
         }
 
         override fun onCharacteristicRead(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) return fail("需要を読み取れませんでした")
-            deliverRead(c.uuid, value)
+            deliverRead(g, c.uuid, value, status)
         }
 
         @Deprecated("Deprecated in Java")
         override fun onCharacteristicRead(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
             if (Build.VERSION.SDK_INT >= 33) return
-            if (status != BluetoothGatt.GATT_SUCCESS) return fail("需要を読み取れませんでした")
             @Suppress("DEPRECATION")
-            deliverRead(c.uuid, c.value ?: ByteArray(0))
+            deliverRead(g, c.uuid, c.value ?: ByteArray(0), status)
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
-            val cb = onWritten ?: return
-            onWritten = null
             main.post {
-                if (status == BluetoothGatt.GATT_SUCCESS) cb(Result.success(Unit))
-                else cb(Result.failure(IllegalStateException("書き込みに失敗しました（$status）")))
+                if (g !== gatt) return@post
+                if (status == BluetoothGatt.GATT_SUCCESS) settleWrite(Result.success(Unit))
+                else settleWrite(Result.failure(IllegalStateException("書き込みに失敗しました（$status）")))
             }
         }
 

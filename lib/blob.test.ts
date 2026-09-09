@@ -48,3 +48,15 @@ describe('seal / unseal', () => {
     expect(() => unseal('')).toThrow(BlobError);
   });
 });
+
+describe('本番での鍵の扱い', () => {
+  it('本番で SOTTO_BLOB_KEY が無ければ固定鍵で代替せずに失敗する', () => {
+    const env = process.env;
+    process.env = { ...env, NODE_ENV: 'production', SOTTO_BLOB_KEY: '' };
+    try {
+      expect(() => seal(needs, 3)).toThrow(BlobError);
+    } finally {
+      process.env = env;
+    }
+  });
+});

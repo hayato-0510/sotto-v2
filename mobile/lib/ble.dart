@@ -88,9 +88,8 @@ class TakenMessage extends PeerMessage {
 }
 
 class ScanHit {
-  const ScanHit({required this.id, required this.token, required this.rssi, required this.at});
+  const ScanHit({required this.id, required this.rssi, required this.at});
   final String id;
-  final String token;
   final int rssi;
   final DateTime at;
 }
@@ -112,7 +111,6 @@ class SottoBle {
   Stream<ScanHit> get scans => events.where((e) => e['type'] == 'scan').map(
         (e) => ScanHit(
           id: e['id'] as String,
-          token: (e['token'] as String?) ?? '',
           rssi: (e['rssi'] as num).toInt(),
           at: DateTime.now(),
         ),

@@ -50,7 +50,9 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
   void initState() {
     super.initState();
     _messages = _ble.messages.listen(_onMessage);
-    _errors = _ble.errors.listen((m) => setState(() => _error = m));
+    _errors = _ble.errors.listen((m) {
+      if (mounted) setState(() => _error = m);
+    });
   }
 
   @override
@@ -78,11 +80,13 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
     });
     try {
       final needs = await _api.extractNeeds(parts.join('。'));
+      if (!mounted) return;
       setState(() {
         _needs = needs;
         _stage = _Stage.confirm;
       });
     } on ApiException catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = e.message;
         _stage = _Stage.declare;
@@ -106,13 +110,16 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
       }
       final blob = await _api.sealDemand(needs);
       await _ble.startDemand(blob);
+      if (!mounted) return;
       setState(() => _stage = _Stage.waiting);
     } on ApiException catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = e.message;
         _stage = _Stage.confirm;
       });
     } on BleException catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = e.message;
         _stage = _Stage.confirm;
