@@ -35,6 +35,10 @@ class _GiverFlowState extends State<GiverFlow> with WidgetsBindingObserver {
   Handoff? _handoff;
   String? _error;
 
+  /// スキャンが始められない（Bluetooth オフ・権限なし）。UX指摘 2-2:
+  /// このとき「いまは近くにいません」は嘘になるので、原因を主メッセージに出す
+  bool _blocked = false;
+
   /// 直近のスキャン結果。id → 最新
   final Map<String, ScanHit> _hits = {};
 
@@ -110,14 +114,20 @@ class _GiverFlowState extends State<GiverFlow> with WidgetsBindingObserver {
   Future<void> _startScan() async {
     try {
       if (!await _ble.requestPermissions()) {
-        throw BleException('Bluetooth の権限が無いと近くの人を見つけられません');
+        throw BleException('近くのデバイスの権限をオンにしてください');
       }
       if (!await _ble.isBluetoothOn()) {
         throw BleException('Bluetooth をオンにしてください');
       }
       await _ble.startScan();
+      if (mounted) setState(() => _blocked = false);
     } on BleException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      if (mounted) {
+        setState(() {
+          _error = e.message;
+          _blocked = true;
+        });
+      }
     }
   }
 
@@ -242,12 +252,13 @@ class _GiverFlowState extends State<GiverFlow> with WidgetsBindingObserver {
       };
 
   Widget _scanning() {
+    if (_blocked) {
+      // UX指摘 2-2: スキャンできない原因を、一番大きい文字で言う
+      return Sheet(body: Lead(_error ?? 'いま近くを見られません'));
+    }
     if (!_someoneNear) {
       // 「また見てみてください」は書かない。催促になる（設計書 §3.3）
-      return Sheet(
-        body: const Lead('いまは近くにいません'),
-        footer: _error == null ? null : Note(_error!),
-      );
+      return const Sheet(body: Lead('いまは近くにいません'));
     }
     return Sheet(
       body: Column(
@@ -259,14 +270,23 @@ class _GiverFlowState extends State<GiverFlow> with WidgetsBindingObserver {
           const SizedBox(height: 12),
           for (final c in Crowding.values) ...[
             _crowding == c
-                ? FilledButton(onPressed: () => setState(() => _crowding = null), child: Text(c.label))
+                ? FilledButton(onPressed: () {}, child: Text(c.label))
                 : OutlinedButton(onPressed: () => setState(() => _crowding = c), child: Text(c.label)),
             const SizedBox(height: 10),
           ],
           if (_error != null) ...[const SizedBox(height: 8), Note(_error!)],
         ],
       ),
-      action: FilledButton(onPressed: _crowding == null ? null : _offer, child: const Text('譲る')),
+      action: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_crowding == null) const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Note('いまの車内をえらぶと譲れます'),
+          ),
+          FilledButton(onPressed: _crowding == null ? null : _offer, child: const Text('譲る')),
+        ],
+      ),
       footer: _hits.length < 2
           ? null
           : const Note(

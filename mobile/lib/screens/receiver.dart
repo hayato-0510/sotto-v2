@@ -205,7 +205,10 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
         _Stage.done => _done(),
       };
 
-  Widget _errorNote() => _error == null ? const SizedBox.shrink() : Note(_error!);
+  Widget _errorNote() => _error == null ? const SizedBox.shrink() : Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Sub(_error!),
+      );
 
   Widget _declare() => Sheet(
         body: Column(
@@ -215,7 +218,7 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
             const SizedBox(height: 28),
             for (var i = 0; i < _choices.length; i++) ...[
               _choice == i
-                  ? FilledButton(onPressed: () => setState(() => _choice = null), child: Text(_choices[i]))
+                  ? FilledButton(onPressed: () {}, child: Text(_choices[i]))
                   : OutlinedButton(onPressed: () => setState(() => _choice = i), child: Text(_choices[i])),
               const SizedBox(height: 12),
             ],
@@ -232,9 +235,19 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
             _errorNote(),
           ],
         ),
-        action: FilledButton(
-          onPressed: (_choice != null || _free.text.trim().isNotEmpty) ? _read : null,
-          child: const Text('つづける'),
+        action: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_choice == null && _free.text.trim().isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 8),
+                child: Note('どれか一つ選んでください'),
+              ),
+            FilledButton(
+              onPressed: (_choice != null || _free.text.trim().isNotEmpty) ? _read : null,
+              child: const Text('つづける'),
+            ),
+          ],
         ),
       );
 
