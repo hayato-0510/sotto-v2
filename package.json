@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build",
-    "try": "tsx scripts/try.mjs"
+    "try": "tsx scripts/try.mjs",
+    "pregenerate": "tsx scripts/pregenerate.mjs",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.124.0",

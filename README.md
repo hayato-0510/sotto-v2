@@ -16,8 +16,10 @@
 - **今回作るのは Android 版のみ。** iOS は次フェーズ（UI は Flutter なので画面の作り直しは発生しない）
 - BLE の詳細と受け渡しの同期手段は未確定。**同期は BLE 直結で足りる可能性があり**、そうなればリアルタイムサービスが不要になる
 
-**近接検知の実機精度は未検証。** 実装より先にスパイクを行う。RSSI で数m判定が安定するか、背景での
-発信が何分続くか、2台間の GATT で Handoff を直接渡せるか。ここが駄目なら設計の土台から書き直しになる。
+**近接検知は室内・近距離では実機2台で成立した**（[`docs/spike-results.md`](docs/spike-results.md)）。
+RSSI で近距離と5m＋壁越しを分けられ、2台間の GATT で Handoff も往復した。
+ただし距離ごとの分布・ポケット内・電車内・背景発信が何分続くかは未検証で、
+ここが駄目なら設計の土台から書き直しになる点は変わらない。
 
 **当面のマッチング動作保証は同一OS間に限る。** iOS が背景で発信するサービスIDは Apple 独自の領域に
 入り Android から検出できないため（[`docs/設計書.md`](docs/設計書.md) §1.5.1）。この制約は UI にも明示する。
@@ -34,6 +36,8 @@
 | [`docs/設計書.md`](docs/設計書.md) | どう作るか。**§7 が「技術選定・未着手」の空欄** |
 | [`docs/スパイク手順書.md`](docs/スパイク手順書.md) | **実装より先に回す検証**の手順・合格基準・落ちたときの戻り先 |
 | [`docs/作品概要書.md`](docs/作品概要書.md) | 審査員向けの一枚要約 |
+| [`docs/デモ動画構成.md`](docs/デモ動画構成.md) | 応募用デモ動画（約1分）の構成と撮り方。**デモの流れはこれを正とする** |
+| [`docs/spike-results.md`](docs/spike-results.md) | 実機2台での検証結果。室内・近距離で §0〜§3 が成立。残る検証項目もここ |
 | [`docs/体験再設計-作業メモ.md`](docs/体験再設計-作業メモ.md) | 今回の再設計で採用しなかった案と、その理由 |
 
 開発時のルールは [`AGENTS.md`](AGENTS.md) を参照。
@@ -46,9 +50,24 @@
 `lib/speech.ts` と `lib/fallback.ts`（発話混入の検出とフォールバック＝**プロダクトの安全根幹**）、
 `lib/types.ts`、`scripts/try.mjs`。
 
-## セットアップ
+## 現在の実装状態（2026-09-10）
 
-現状のコードは AI サーバ側（`lib/*.ts`）だけで、Flutter アプリはまだ1行も無い。
+AI サーバ（`app/api/*`、`lib/*.ts`）と Flutter アプリ（`mobile/`）の両方がある。
+**室内・近距離では実機2台で通し確認が成立（[`docs/spike-results.md`](docs/spike-results.md)）。** 距離分布・ポケット内・電車内・背景発信の持続は未検証。実機不在のままスパイクを飛ばして実装した経緯と暫定値は
+[`docs/開発計画.md`](docs/開発計画.md) と [`docs/設計書.md`](docs/設計書.md) §7.2.1、実機での確認手順は
+[`docs/手動確認.md`](docs/手動確認.md) にある。
+
+| エンドポイント | 役割 |
+| :--- | :--- |
+| `POST /api/needs` | ステップ1：状態テキスト → Needs |
+| `POST /api/demands` | 本人が確認した Needs をサーバ鍵で封緘して返す。サーバは何も保存しない |
+| `POST /api/handoff` | ステップ2：封緘 ＋ 混雑度 → Handoff（発話検証つき） |
+| `GET /api/health` | 疎通確認（鍵の値は返さない） |
+
+需要の中身は封緘されたまま受け手の端末が持ち、BLE（GATT）で譲る側の端末へ渡り、サーバでだけ復号される。
+譲る側の端末は Needs を一度も復号できない。
+
+## セットアップ
 
 ```bash
 npm install
@@ -61,4 +80,38 @@ cp .env.local.example .env.local
 ```bash
 npm run check   # typecheck → lint → test → build
 npm run try -- "貧血気味で立っているとふらつく" 超満員 3   # UIを経由せずプロンプトを試す
+npm run smoke -- http://localhost:3000                   # 4本のエンドポイントを順に叩く（デプロイ先のURLも可）
+npm run pregenerate                                       # 審査用の混雑度対比データを mobile/assets に生成
+cd mobile && flutter analyze && flutter test              # アプリ側
+```
+
+## デプロイ（Vercel）と APK
+
+```bash
+vercel login
+vercel --prod
+```
+
+Vercel の Environment Variables に `GOOGLE_API_KEY` と `SOTTO_BLOB_KEY`（`.env.local.example` 参照）を登録して再デプロイし、
+`npm run smoke -- https://<デプロイ先>` で `provider=google blobKey=set` を確認する。
+
+**`.env.local` から値を流し込むときは、引用符と `\r` を落とすこと。** Next の env ローダは値を囲む引用符を
+剥がすのでローカルでは動くが、`vercel env add` に渡すと引用符ごと登録されて鍵が無効になり、生成がすべて
+定型文に落ちる（実際に踏んだ。CRLF の `\r` も同じ）。`smoke` で「（定型）」が並ぶのに `provider=google` なら、
+SDK を疑う前に、取り出した値そのもので Gemini の REST を叩いて鍵を検証する（200 以外なら取り出し方が悪い）：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H "x-goog-api-key: $(grep '^GOOGLE_API_KEY=' .env.local | cut -d= -f2- | tr -d '\r\n' | sed -E 's/^(["'"'"'])(.*)\1$/\2/')" https://generativelanguage.googleapis.com/v1beta/models
+```
+
+`SOTTO_BLOB_KEY` は本番では必須で、無いと `/api/demands` と `/api/handoff` が失敗する（固定鍵で代替しない）。
+
+```bash
+grep '^GOOGLE_API_KEY=' .env.local | cut -d= -f2- | tr -d '\r\n' | sed -E 's/^(["'"'"'])(.*)\1$/\2/' | vercel env add GOOGLE_API_KEY production
+```
+
+アプリはデプロイ先の URL を埋め込んでビルドする：
+
+```bash
+cd mobile && flutter build apk --release --dart-define=SOTTO_API_BASE=https://<デプロイ先>
 ```

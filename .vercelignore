@@ -1,0 +1,4 @@
+# Vercel にはAIサーバだけを上げる。Flutter のビルド成果物（数百MB）を含めない
+mobile
+docs
+.code-review-graph

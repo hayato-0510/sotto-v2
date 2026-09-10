@@ -147,9 +147,17 @@ npm run check
 
 `typecheck` → `lint` → `test` → `build` を順に実行する。**これが通らないコードをコミットしない。**
 
-Flutter アプリを作り始めたら `flutter analyze` と `flutter test` をここに追記すること。
+Flutter アプリ（`mobile/`）は次のとおり。
+
+```bash
+cd mobile && flutter analyze && flutter test
+```
+
 `lib/speech.test.ts` と `lib/fallback.test.ts` はプロダクトの安全根幹なので、発話検証を
 アプリ側へ移すことがあっても等価なテストを必ず残す（`docs/設計書.md` §8.3）。
+
+BLE は実機でしか動かない。`flutter test` が通っても近接検知は検証されていない。
+実機での通し確認は `docs/手動確認.md` のチェックリストで行う。
 
 プロンプトだけを試すときは UI を経由せずに：
 
@@ -188,3 +196,13 @@ v4.0 でもう一つ増えた。
 相手が本当に席を必要としているかを推測させる場面、複数の候補から選ばせる場面、
 断ったことが誰かに伝わる場面は、いずれもコンセプトの中核を壊す。
 機能を足すときは、まずこれを疑うこと。
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
