@@ -1,7 +1,7 @@
 /// UI の部品。設計書 §3 の引き算のルールをここで縛る。
 ///
 /// - カードを使わない。角丸パネルもコンテナも置かない
-/// - 1画面＝1メッセージ＋最大1アクション
+/// - 1画面＝1メッセージ＋最大1アクション（例外は画面上端の YouAre だけ）
 /// - 階層は文字サイズだけで作る
 /// - 「何も無い」状態は本当に何も出さない
 /// - 色は状態だけを運ぶ
@@ -10,6 +10,8 @@
 library;
 
 import 'package:flutter/material.dart';
+
+import 'profile.dart';
 
 const Color ink = Color(0xFF1A1A1A);
 const Color paper = Color(0xFFFAFAF7);
@@ -89,7 +91,7 @@ class Note extends StatelessWidget {
 
 /// 画面の骨。上に文、下にアクション。囲みは無い
 class Sheet extends StatelessWidget {
-  const Sheet({super.key, required this.body, this.action, this.corner, this.footer});
+  const Sheet({super.key, required this.body, this.action, this.corner, this.footer, this.onBack});
 
   /// 文（見出しと添え文）
   final Widget body;
@@ -103,23 +105,90 @@ class Sheet extends StatelessWidget {
   /// 最下部の注記
   final Widget? footer;
 
+  /// 前の画面へ戻る。設定のように上に積んだ画面でだけ使う。
+  /// 隅の corner（やめる など）とは役目が違うので、Android の標準の位置（左上）に、
+  /// 本文と同じ濃さで「もどる」と文字も添えて置く。矢印だけでは伝わらない人がいる
+  final VoidCallback? onBack;
+
   @override
   Widget build(BuildContext context) => Scaffold(
         body: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(28, 48, 28, 24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(child: SingleChildScrollView(child: body)),
-                if (action != null) ...[const SizedBox(height: 24), action!],
-                if (corner != null) ...[
-                  const SizedBox(height: 8),
-                  Align(alignment: Alignment.centerRight, child: corner),
-                ],
-                if (footer != null) ...[const SizedBox(height: 16), footer!],
-              ],
-            ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (onBack != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 0, 0),
+                  child: TextButton.icon(
+                    onPressed: onBack,
+                    icon: const Icon(Icons.arrow_back, size: 24),
+                    label: const Text('もどる'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: ink,
+                      minimumSize: const Size(0, 48),
+                      textStyle: const TextStyle(fontSize: 17),
+                    ),
+                  ),
+                ),
+              Expanded(
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(28, onBack == null ? 48 : 16, 28, 24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(child: SingleChildScrollView(child: body)),
+                      if (action != null) ...[const SizedBox(height: 24), action!],
+                      if (corner != null) ...[
+                        const SizedBox(height: 8),
+                        Align(alignment: Alignment.centerRight, child: corner),
+                      ],
+                      if (footer != null) ...[const SizedBox(height: 16), footer!],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+}
+
+/// いまの立場の常時表示。1画面＝1メッセージの唯一の例外（設計書 §3）。
+///
+/// 画面上の他の文はすべて相手のこと（「すぐ近くに、席を必要としている人がいます」）なので、
+/// ここだけ主語を「あなた」と明示し、自分の話だと取り違えないようにする。
+/// アイコンは姿勢で分ける。両方を「席」の絵にすると左右の区別がつかない
+class YouAre extends StatelessWidget {
+  const YouAre({super.key, required this.role, required this.onSettings});
+
+  final Role role;
+  final VoidCallback onSettings;
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: paper,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(28, 4, 12, 0),
+          child: Row(
+            children: [
+              Icon(
+                switch (role) {
+                  Role.seeker => Icons.accessibility_new,
+                  Role.giver => Icons.airline_seat_recline_normal,
+                },
+                size: 22,
+                color: ink,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('あなた ／ ${role.label}', style: const TextStyle(fontSize: 15, color: ink)),
+              ),
+              IconButton(
+                onPressed: onSettings,
+                tooltip: '設定',
+                icon: const Icon(Icons.settings_outlined, color: faint),
+              ),
+            ],
           ),
         ),
       );

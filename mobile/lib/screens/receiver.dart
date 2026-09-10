@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../ble.dart';
+import '../profile.dart';
 import '../types.dart';
 import '../ui.dart';
 
@@ -12,12 +13,19 @@ import '../ui.dart';
 /// 需要の宣言 → Needs 確認 → 待機 → 申し出の受信 → お礼、を1つの状態機械で持つ。
 /// BLE のイベントを受ける場所を1箇所にするため、画面を分けずに状態で描き分ける。
 ///
-/// 常時設定（FR-16 慢性側）と必要確認（FR-18）は今回のビルドに含めない。
-/// デモ動画の流れ（作品概要書 §3）に映らないため（AGENTS.md スコープ判断）。
-enum _Stage { declare, reading, confirm, sealing, waiting, offered, askSeated, notFound, cancelled, done }
+/// 需要の中身は、初めて発信するときに保存する（lib/profile.dart）。次からは要約と
+/// ［ これで発信する ］だけの画面（ready）から始まり、4択も AI の待ち時間も通らない。
+/// 発信は毎回本人が押して始める。この1タップが「いま席が要る」の意思表示を兼ねるので、
+/// 常時設定の必要確認（FR-18）は置かない。中身を変えるのは設定画面の［ 変える ］から。
+enum _Stage { declare, reading, confirm, ready, sealing, waiting, offered, askSeated, notFound, cancelled, done }
 
 class ReceiverFlow extends StatefulWidget {
-  const ReceiverFlow({super.key});
+  const ReceiverFlow({super.key, required this.profile, this.api});
+
+  final Profile profile;
+
+  /// テストで AI サーバを差し替えるためだけにある。null なら本物へ繋ぐ
+  final SottoApi? api;
 
   @override
   State<ReceiverFlow> createState() => _ReceiverFlowState();
@@ -34,13 +42,13 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
   /// お礼のタップが無いときに「座れましたか」を出すまでの時間（設計書 §2.5、FR-10）
   static const _seatedAskAfter = Duration(seconds: 90);
 
-  final _api = SottoApi();
+  late final SottoApi _api = widget.api ?? SottoApi();
   final _ble = SottoBle.instance;
   final _free = TextEditingController();
 
-  _Stage _stage = _Stage.declare;
+  late Needs? _needs = widget.profile.needs;
+  late _Stage _stage = _needs == null ? _Stage.declare : _Stage.ready;
   int? _choice;
-  Needs? _needs;
   String? _error;
   StreamSubscription<PeerMessage>? _messages;
   StreamSubscription<String>? _errors;
@@ -97,6 +105,10 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
   Future<void> _startDemand() async {
     final needs = _needs;
     if (needs == null) return;
+    // 失敗したら押す前の画面（初回は確認、2回目以降は ready）に戻す
+    final back = _stage;
+    await widget.profile.setNeeds(needs);
+    if (!mounted) return;
     setState(() {
       _stage = _Stage.sealing;
       _error = null;
@@ -116,22 +128,28 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
       if (!mounted) return;
       setState(() {
         _error = e.message;
-        _stage = _Stage.confirm;
+        _stage = back;
       });
     } on BleException catch (e) {
       if (!mounted) return;
       setState(() {
         _error = e.message;
-        _stage = _Stage.confirm;
+        _stage = back;
       });
     }
   }
 
+  /// 発信を止めて ready に戻る。需要の中身は保存済みなので、次は1タップで再開できる
   Future<void> _stop() async {
     _timer?.cancel();
     await _ble.stopDemand().catchError((_) {});
-    if (mounted) Navigator.of(context).pop();
+    if (mounted) _toReady();
   }
+
+  void _toReady() => setState(() {
+        _stage = _Stage.ready;
+        _error = null;
+      });
 
   void _onMessage(PeerMessage m) {
     switch (m) {
@@ -177,6 +195,7 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
         _Stage.declare => _declare(),
         _Stage.reading => const Sheet(body: Lead('読み取っています')),
         _Stage.confirm => _confirm(),
+        _Stage.ready => _ready(),
         _Stage.sealing => const Sheet(body: Lead('発信の準備をしています')),
         _Stage.waiting => _waiting(),
         _Stage.offered => _offered(),
@@ -217,7 +236,6 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
           onPressed: (_choice != null || _free.text.trim().isNotEmpty) ? _read : null,
           child: const Text('つづける'),
         ),
-        corner: TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('もどる')),
       );
 
   Widget _confirm() {
@@ -242,6 +260,25 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
         }),
         child: const Text('書き直す'),
       ),
+    );
+  }
+
+  /// 2回目以降の最初の画面。保存した要約を本人にだけ見せ、押せば発信する
+  Widget _ready() {
+    final needs = _needs!;
+    return Sheet(
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Lead('こう受け取っています'),
+          const SizedBox(height: 28),
+          Sub(needs.summary),
+          const SizedBox(height: 16),
+          if (needs.isFallback) const Note('自動の読み取りに失敗したため、定型の内容になっています'),
+          _errorNote(),
+        ],
+      ),
+      action: FilledButton(onPressed: _startDemand, child: const Text('これで発信する')),
     );
   }
 
@@ -297,6 +334,6 @@ class _ReceiverFlowState extends State<ReceiverFlow> {
 
   Widget _done() => Sheet(
         body: const Lead('伝えました', color: live),
-        action: FilledButton(onPressed: () => Navigator.of(context).pop(), child: const Text('閉じる')),
+        action: FilledButton(onPressed: _toReady, child: const Text('閉じる')),
       );
 }

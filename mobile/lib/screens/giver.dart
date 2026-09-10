@@ -10,19 +10,24 @@ import '../ui.dart';
 /// 譲る側の一連の画面（設計書 §3.1・§3.3）。
 ///
 /// プル型（§2.2）：この画面を開いている間だけスキャンする。通知は一切ない。
+/// アプリを離れたら（ホームへ戻る等）スキャンを止め、戻ったら再開する。閉じるボタンは置かない。
+/// この画面が最初の画面なので戻り先が無く、離れ方は端末の操作に任せる
 /// 相手の状態は一切出さない。「近くに必要な人がいる」だけを見せる。
 /// 押さずに閉じれば何も起こらず、受け手はこの人が見たことすら知らない（FR-09）。
 enum _Stage { scanning, preparing, action, thanks, taken, notFound, cancelled }
 
 class GiverFlow extends StatefulWidget {
-  const GiverFlow({super.key});
+  const GiverFlow({super.key, this.api});
+
+  /// テストで AI サーバを差し替えるためだけにある。null なら本物へ繋ぐ
+  final SottoApi? api;
 
   @override
   State<GiverFlow> createState() => _GiverFlowState();
 }
 
-class _GiverFlowState extends State<GiverFlow> {
-  final _api = SottoApi();
+class _GiverFlowState extends State<GiverFlow> with WidgetsBindingObserver {
+  late final SottoApi _api = widget.api ?? SottoApi();
   final _ble = SottoBle.instance;
 
   _Stage _stage = _Stage.scanning;
@@ -68,11 +73,29 @@ class _GiverFlowState extends State<GiverFlow> {
       _hits.removeWhere((_, h) => now.difference(h.at) > scanStaleness);
       if (wasNear != _someoneNear && mounted) setState(() {});
     });
+    WidgetsBinding.instance.addObserver(this);
     _startScan();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 受け渡し中は触らない。接続を切ると相手の画面が宙に浮く
+    if (_stage != _Stage.scanning) return;
+    switch (state) {
+      case AppLifecycleState.paused:
+        _ble.stopScan().catchError((_) {});
+        // 戻ったときに古い検出で「すぐ近くに」を一瞬出さない
+        setState(_hits.clear);
+      case AppLifecycleState.resumed:
+        _startScan();
+      default:
+        break;
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _prune?.cancel();
     _timer?.cancel();
     _scans?.cancel();
@@ -223,7 +246,6 @@ class _GiverFlowState extends State<GiverFlow> {
       // 「また見てみてください」は書かない。催促になる（設計書 §3.3）
       return Sheet(
         body: const Lead('いまは近くにいません'),
-        corner: TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('閉じる')),
         footer: _error == null ? null : Note(_error!),
       );
     }
@@ -245,7 +267,6 @@ class _GiverFlowState extends State<GiverFlow> {
         ],
       ),
       action: FilledButton(onPressed: _crowding == null ? null : _offer, child: const Text('譲る')),
-      corner: TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('閉じる')),
       footer: _hits.length < 2
           ? null
           : const Note(

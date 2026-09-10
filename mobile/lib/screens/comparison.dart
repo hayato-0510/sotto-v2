@@ -44,7 +44,7 @@ class ComparisonScreen extends StatelessWidget {
                 ],
               ],
             ),
-            corner: TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('閉じる')),
+            onBack: () => Navigator.of(context).pop(),
             footer: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
